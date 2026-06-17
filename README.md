@@ -42,7 +42,11 @@ A **bundle** is one physical bag of a single category. Its on-chain status moves
    - *Shortcut:* the admin can also `registerParticipant` to onboard someone directly, and
      `scripts/seed-local.mjs` uses this to pre-approve a demo supplier (#1) and NGO (#2).
 
-### Phase 1 — Donation (Supplier)
+### Phase 1 — Donation (Supplier only)
+> **Only a Supplier can add bundles.** `createBundle` is restricted to `SUPPLIER_ROLE`, so
+> NGOs (and the admin) **cannot** supply items. An NGO's only powers are to *claim* and
+> *confirm receipt* — it is purely a recipient, never a donor.
+
 4. An approved **supplier** calls **`createBundle`** with: category (Shirts/Pants/Shoes/
    Jackets/Accessories/Other), condition (New/Good/Fair), item count, description, and origin.
 5. The contract assigns a new **bundle id** and derives a **unique QR hash**

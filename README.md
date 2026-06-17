@@ -17,14 +17,73 @@ Suppliers and NGOs **apply in-app** and must be **approved by the admin** before
 ## Workflow
 
 ```
-apply → admin approves → SUPPLIER creates bundle (gets unique QR)
-      → NGO claims bundle → bag delivered physically
-      → NGO scans QR → contract verifies hash → status = Delivered
+            ┌─────────┐  approve   ┌────────────┐
+ apply ────►│  ADMIN  │───────────►│ SUPPLIER / │
+            └─────────┘            │    NGO     │
+                                   └────────────┘
+ SUPPLIER: createBundle ──► [Available] ──cancel──► [Cancelled]
+                                  │
+ NGO: claimBundle                 ▼
+                            [Claimed] ──release──► [Available]
+                                  │
+ NGO: scan QR + confirmReceipt    ▼
+                            [Delivered]   ✅ (final)
 ```
 
-The QR encodes `bcds:<bundleId>:<qrHash>`. `confirmReceipt` only succeeds when the scanned
-hash matches the on-chain hash for the bundle assigned to that NGO — the cryptographic proof
-that the correct bag arrived.
+A **bundle** is one physical bag of a single category. Its on-chain status moves through
+`Available → Claimed → Delivered` (or `Cancelled`). Here is the full lifecycle in detail.
+
+### Phase 0 — Onboarding (one-time per participant)
+1. The **admin** is whoever deploys the contract — set automatically, no application needed.
+2. A donor or relief org connects their wallet and submits **`applyForRole`** with their org
+   name and contact/certification info. Their application is stored on-chain as *Pending*.
+3. The **admin** reviews applications and calls **`approveApplicant`** (grants `SUPPLIER_ROLE`
+   or `NGO_ROLE`) or **`rejectApplicant`**. Only after approval can they act.
+   - *Shortcut:* the admin can also `registerParticipant` to onboard someone directly, and
+     `scripts/seed-local.mjs` uses this to pre-approve a demo supplier (#1) and NGO (#2).
+
+### Phase 1 — Donation (Supplier)
+4. An approved **supplier** calls **`createBundle`** with: category (Shirts/Pants/Shoes/
+   Jackets/Accessories/Other), condition (New/Good/Fair), item count, description, and origin.
+5. The contract assigns a new **bundle id** and derives a **unique QR hash**
+   (`keccak256` of id + supplier + time + randomness). Status becomes **`Available`**.
+6. The frontend renders that hash as a **printable QR code**. The supplier prints it and
+   **sticks it on the physical bag**. This QR is the permanent link between the real bag and
+   its on-chain record.
+7. While still `Available`, the supplier may **`cancelBundle`** (e.g. created by mistake) →
+   status `Cancelled`.
+
+### Phase 2 — Claiming (NGO)
+8. Every `Available` bundle appears on the public dashboard. An approved **NGO** browses /
+   filters by category and calls **`claimBundle`**.
+9. Status becomes **`Claimed`** and `claimedBy` is set to that NGO. The bundle is now reserved —
+   no other NGO can take it.
+10. If the NGO can no longer fulfil it, it calls **`releaseClaim`** → status returns to
+    `Available` for someone else.
+
+### Phase 3 — Delivery & QR verification (NGO) — the core feature
+11. The bag is physically transported to the NGO.
+12. On arrival the NGO **scans the QR** on the bag (camera, or manual paste). The QR encodes
+    `bcds:<bundleId>:<qrHash>`.
+13. The frontend calls **`confirmReceipt(bundleId, scannedHash)`**. The contract checks **all**
+    of:
+    - the caller holds `NGO_ROLE`,
+    - the bundle is in `Claimed` status,
+    - the caller is the NGO that claimed it (`claimedBy == msg.sender`),
+    - **the scanned hash matches the bundle's stored `qrHash`.**
+14. If everything matches → status becomes **`Delivered`**, `deliveredAt` is recorded, and a
+    `BundleDelivered` event is emitted. If the scanned bag is the wrong one (hash mismatch), the
+    call **reverts** — you can't confirm delivery of a bag that isn't the one assigned.
+
+This last check is the point of the whole system: the QR scan is **cryptographic proof** that
+the exact bag the supplier donated is the one that reached the NGO — recorded on a public,
+tamper-proof ledger that anyone can audit.
+
+### Identity & transparency
+- Every action (`approve`, `createBundle`, `claimBundle`, `confirmReceipt`, …) is a wallet-signed
+  transaction, so **who did what is provable** by address.
+- All bundles and their full status history live on-chain and are visible on the public ledger
+  view — nobody can fake a donation or claim a delivery happened when it didn't.
 
 ## Project layout
 

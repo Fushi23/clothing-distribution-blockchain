@@ -147,20 +147,37 @@ describe("Blockchain Clothing Distribution System (BCDS)", function () {
     it("lets an NGO claim an available bundle", async function () {
       const { bcds, ngo } = await networkHelpers.loadFixture(seededFixture);
 
-      await expect(bcds.connect(ngo).claimBundle(1))
+      await expect(bcds.connect(ngo).claimBundle(1, "Flood Camp B, Terengganu"))
         .to.emit(bcds, "BundleClaimed")
         .withArgs(1, ngo.address);
 
       const bundle = await bcds.getBundle(1);
       expect(bundle.status).to.equal(BundleStatus.Claimed);
       expect(bundle.claimedBy).to.equal(ngo.address);
+      expect(bundle.deliveryLocation).to.equal("Flood Camp B, Terengganu");
+    });
+
+    it("requires a delivery location when claiming", async function () {
+      const { bcds, ngo } = await networkHelpers.loadFixture(seededFixture);
+      await expect(bcds.connect(ngo).claimBundle(1, "")).to.be.revertedWithCustomError(
+        bcds,
+        "EmptyField"
+      );
+    });
+
+    it("clears the delivery location when a claim is released", async function () {
+      const { bcds, ngo } = await networkHelpers.loadFixture(seededFixture);
+      await bcds.connect(ngo).claimBundle(1, "Flood Camp B, Terengganu");
+      await bcds.connect(ngo).releaseClaim(1);
+      const bundle = await bcds.getBundle(1);
+      expect(bundle.deliveryLocation).to.equal("");
     });
 
     it("prevents double-claiming", async function () {
       const { bcds, ngo } = await networkHelpers.loadFixture(seededFixture);
 
-      await bcds.connect(ngo).claimBundle(1);
-      await expect(bcds.connect(ngo).claimBundle(1)).to.be.revertedWithCustomError(
+      await bcds.connect(ngo).claimBundle(1, "Flood Camp B, Terengganu");
+      await expect(bcds.connect(ngo).claimBundle(1, "Flood Camp B, Terengganu")).to.be.revertedWithCustomError(
         bcds,
         "BundleNotAvailable"
       );
@@ -168,13 +185,13 @@ describe("Blockchain Clothing Distribution System (BCDS)", function () {
 
     it("rejects a claim from a non-NGO", async function () {
       const { bcds, supplier } = await networkHelpers.loadFixture(seededFixture);
-      await expect(bcds.connect(supplier).claimBundle(1)).to.revert(ethers);
+      await expect(bcds.connect(supplier).claimBundle(1, "Flood Camp B, Terengganu")).to.revert(ethers);
     });
 
     it("lets the NGO release a claim back to the pool", async function () {
       const { bcds, ngo } = await networkHelpers.loadFixture(seededFixture);
 
-      await bcds.connect(ngo).claimBundle(1);
+      await bcds.connect(ngo).claimBundle(1, "Flood Camp B, Terengganu");
       await expect(bcds.connect(ngo).releaseClaim(1)).to.emit(bcds, "ClaimReleased");
 
       const bundle = await bcds.getBundle(1);
@@ -191,7 +208,7 @@ describe("Blockchain Clothing Distribution System (BCDS)", function () {
     it("confirms delivery when the scanned QR hash matches", async function () {
       const { bcds, ngo } = await networkHelpers.loadFixture(seededFixture);
 
-      await bcds.connect(ngo).claimBundle(1);
+      await bcds.connect(ngo).claimBundle(1, "Flood Camp B, Terengganu");
       const { qrHash } = await bcds.getBundle(1);
 
       await expect(bcds.connect(ngo).confirmReceipt(1, qrHash))
@@ -206,7 +223,7 @@ describe("Blockchain Clothing Distribution System (BCDS)", function () {
     it("rejects a wrong/forged QR hash", async function () {
       const { bcds, ngo } = await networkHelpers.loadFixture(seededFixture);
 
-      await bcds.connect(ngo).claimBundle(1);
+      await bcds.connect(ngo).claimBundle(1, "Flood Camp B, Terengganu");
       const forged = ethers.keccak256(ethers.toUtf8Bytes("not-the-real-bag"));
 
       await expect(bcds.connect(ngo).confirmReceipt(1, forged)).to.be.revertedWithCustomError(
@@ -221,7 +238,7 @@ describe("Blockchain Clothing Distribution System (BCDS)", function () {
       // Onboard a second NGO.
       await bcds.connect(admin).registerParticipant(outsider.address, ApplicantType.NGO);
 
-      await bcds.connect(ngo).claimBundle(1);
+      await bcds.connect(ngo).claimBundle(1, "Flood Camp B, Terengganu");
       const { qrHash } = await bcds.getBundle(1);
 
       await expect(
@@ -273,7 +290,7 @@ describe("Blockchain Clothing Distribution System (BCDS)", function () {
     it("reports aggregate stats", async function () {
       const { bcds, ngo } = await networkHelpers.loadFixture(seededFixture);
 
-      await bcds.connect(ngo).claimBundle(1);
+      await bcds.connect(ngo).claimBundle(1, "Flood Camp B, Terengganu");
       const [total, available, claimed, delivered] = await bcds.getStats();
       expect(total).to.equal(1n);
       expect(available).to.equal(0n);

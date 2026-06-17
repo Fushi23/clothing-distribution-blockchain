@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Html5Qrcode } from "html5-qrcode";
 import { styles } from "../styles";
 import { decodeQrPayload } from "../lib";
@@ -7,49 +7,96 @@ import { decodeQrPayload } from "../lib";
 // fallback. Calls onResult({ bundleId, qrHash }) when a valid code is read.
 export default function QrScannerModal({ onResult, onClose }) {
   const regionId = "qr-scan-region";
-  const scannerRef = useRef(null);
+
   const [error, setError] = useState("");
   const [manual, setManual] = useState("");
-  const [cameraOn, setCameraOn] = useState(true);
+  const [status, setStatus] = useState("starting"); // starting | scanning | failed
+  const [cameras, setCameras] = useState([]);
+  const [cameraId, setCameraId] = useState("");
 
+  // Discover available cameras once.
   useEffect(() => {
-    if (!cameraOn) return;
+    let cancelled = false;
+    Html5Qrcode.getCameras()
+      .then((devices) => {
+        if (cancelled) return;
+        if (!devices || devices.length === 0) {
+          setError("No camera found. Use manual entry below.");
+          setStatus("failed");
+          return;
+        }
+        setCameras(devices);
+        // Prefer a back/rear camera if labelled (mobile); otherwise the first.
+        const back = devices.find((d) => /back|rear|environment/i.test(d.label));
+        setCameraId((back || devices[0]).id);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setError("Camera access blocked or unavailable — use manual entry. (" + (e?.message || e) + ")");
+        setStatus("failed");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // (Re)start the stream whenever the chosen camera changes.
+  useEffect(() => {
+    if (!cameraId) return;
     const html5 = new Html5Qrcode(regionId);
-    scannerRef.current = html5;
-    let stopped = false;
+    let handled = false; // a code was read; don't fire onResult twice
+    let tornDown = false; // stop() already requested
+    // Reset to the loading state each time we (re)start on a new camera.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setStatus("starting");
+
+    // Stop the camera at most once, swallowing the "not running" errors that
+    // happen during React StrictMode's double-mount.
+    async function safeStop() {
+      if (tornDown) return;
+      tornDown = true;
+      try {
+        if (html5.isScanning) await html5.stop();
+      } catch {
+        /* already stopped */
+      }
+    }
 
     html5
       .start(
-        { facingMode: "environment" },
-        { fps: 10, qrbox: { width: 220, height: 220 } },
-        (decodedText) => {
-          const parsed = decodeQrPayload(decodedText);
-          if (parsed) {
-            stopAndClose(parsed);
-          }
+        cameraId,
+        {
+          fps: 10,
+          qrbox: (vw, vh) => {
+            const size = Math.floor(Math.min(vw, vh) * 0.7);
+            return { width: size, height: size };
+          },
         },
-        () => {} // ignore per-frame decode errors
+        async (decodedText) => {
+          if (handled) return;
+          const parsed = decodeQrPayload(decodedText);
+          if (!parsed) return;
+          handled = true;
+          // Fully stop the camera BEFORE telling the parent to close the modal,
+          // so the library never touches the DOM after React unmounts it.
+          await safeStop();
+          onResult(parsed);
+        },
+        () => {}
       )
+      .then(() => {
+        if (!tornDown) setStatus("scanning");
+      })
       .catch((e) => {
-        setError("Camera unavailable — use manual entry below. (" + (e?.message || e) + ")");
-        setCameraOn(false);
+        setError("Could not start camera — try another below or use manual entry. (" + (e?.message || e) + ")");
+        setStatus("failed");
       });
 
-    function stopAndClose(parsed) {
-      if (stopped) return;
-      stopped = true;
-      html5
-        .stop()
-        .catch(() => {})
-        .finally(() => onResult(parsed));
-    }
-
     return () => {
-      stopped = true;
-      html5.stop().catch(() => {});
+      safeStop();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cameraOn]);
+  }, [cameraId]);
 
   function submitManual() {
     const parsed = decodeQrPayload(manual);
@@ -62,13 +109,33 @@ export default function QrScannerModal({ onResult, onClose }) {
 
   return (
     <div style={styles.modalBackdrop} onClick={onClose}>
+      <style>{`
+        #${regionId} video { width: 100% !important; height: 100% !important; object-fit: cover; }
+        #${regionId} img, #${regionId} button { display: none; }
+      `}</style>
       <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <h3 style={styles.cardTitle}>📷 Scan bag QR to confirm receipt</h3>
         <p style={styles.cardSub}>
-          Point the camera at the QR printed on the bag. The hash is verified on-chain.
+          Hold the QR steady, ~15–25&nbsp;cm from the camera, well lit and in focus.
         </p>
 
-        {cameraOn && <div id={regionId} style={{ width: "100%", borderRadius: 8, overflow: "hidden" }} />}
+        <div style={cameraBox}>
+          <div id={regionId} style={{ width: "100%", height: "100%" }} />
+          {status === "scanning" && <div style={aimFrame} />}
+          {status === "starting" && <div style={overlayText}>Starting camera… allow access</div>}
+          {status === "failed" && <div style={overlayText}>Camera unavailable — use manual entry ↓</div>}
+        </div>
+
+        {cameras.length > 1 && (
+          <div style={{ marginTop: 10 }}>
+            <label style={styles.label}>Camera</label>
+            <select style={styles.input} value={cameraId} onChange={(e) => setCameraId(e.target.value)}>
+              {cameras.map((c, i) => (
+                <option key={c.id} value={c.id}>{c.label || `Camera ${i + 1}`}</option>
+              ))}
+            </select>
+          </div>
+        )}
 
         {error && <div style={{ ...styles.log, color: "#fca5a5" }}>{error}</div>}
 
@@ -80,6 +147,9 @@ export default function QrScannerModal({ onResult, onClose }) {
             onChange={(e) => setManual(e.target.value)}
             placeholder="bcds:1:0x… or 0x…"
           />
+          <div style={{ fontSize: 11, color: "#64748b", marginTop: 4 }}>
+            Camera not cooperating? Paste the bundle's <code>bcds:&lt;id&gt;:&lt;hash&gt;</code> code here instead.
+          </div>
         </div>
 
         <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
@@ -94,3 +164,33 @@ export default function QrScannerModal({ onResult, onClose }) {
     </div>
   );
 }
+
+const cameraBox = {
+  position: "relative",
+  width: "100%",
+  height: 260,
+  backgroundColor: "#0f172a",
+  borderRadius: 10,
+  overflow: "hidden",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+};
+
+const aimFrame = {
+  position: "absolute",
+  width: 170,
+  height: 170,
+  border: "3px solid rgba(255,255,255,0.85)",
+  borderRadius: 12,
+  pointerEvents: "none",
+};
+
+const overlayText = {
+  position: "absolute",
+  color: "#cbd5e1",
+  fontSize: 13,
+  fontFamily: "monospace",
+  textAlign: "center",
+  padding: "0 12px",
+};

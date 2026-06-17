@@ -4,6 +4,7 @@ import { CONTRACT_ADDRESS, CONTRACT_ABI } from "./contract";
 import { styles } from "./styles";
 import QrImage from "./components/QrImage";
 import QrScannerModal from "./components/QrScannerModal";
+import ReceiptModal from "./components/ReceiptModal";
 import {
   CATEGORY,
   CONDITION,
@@ -33,6 +34,7 @@ export default function App() {
   const [stats, setStats] = useState({ total: 0, available: 0, claimed: 0, delivered: 0 });
   const [log, setLog] = useState("Connect MetaMask to interact. Browsing public ledger…");
   const [scanFor, setScanFor] = useState(null);
+  const [receiptFor, setReceiptFor] = useState(null);
 
   const hasRole = roles.isAdmin || roles.isSupplier || roles.isNgo;
 
@@ -45,6 +47,22 @@ export default function App() {
     const provider = new ethers.BrowserProvider(window.ethereum);
     const signer = await provider.getSigner();
     return new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer);
+  }
+
+  // Pull the claim/delivery transactions for a bundle from contract events,
+  // used to build the on-chain receipt.
+  async function fetchReceipt(bundleId) {
+    const c = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, readProvider());
+    const out = {};
+    const pick = async (events) => {
+      if (!events.length) return null;
+      const e = events[events.length - 1];
+      const blk = await e.getBlock();
+      return { txHash: e.transactionHash, block: e.blockNumber, time: blk?.timestamp };
+    };
+    out.claim = await pick(await c.queryFilter(c.filters.BundleClaimed(bundleId)));
+    out.delivery = await pick(await c.queryFilter(c.filters.BundleDelivered(bundleId)));
+    return out;
   }
 
   // ---- data loading ----
@@ -64,7 +82,14 @@ export default function App() {
         }
       }
       const c = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, provider);
-      const [all, st, isPaused] = await Promise.all([c.getAllBundles(), c.getStats(), c.paused()]);
+      // Applicant records carry org name + contact — used to show who a bundle
+      // is from, so we load them for everyone, not just the admin.
+      const [all, st, isPaused, apps] = await Promise.all([
+        c.getAllBundles(),
+        c.getStats(),
+        c.paused(),
+        c.getAllApplicants(),
+      ]);
       setBundles(all.map(normalizeBundle));
       setStats({
         total: Number(st[0]),
@@ -73,17 +98,13 @@ export default function App() {
         delivered: Number(st[3]),
       });
       setPaused(isPaused);
+      setApplicants(apps.map(normalizeApplicant));
 
       if (acct) {
         const r = await c.getRoles(acct);
-        const nextRoles = { isAdmin: r[0], isSupplier: r[1], isNgo: r[2] };
-        setRoles(nextRoles);
+        setRoles({ isAdmin: r[0], isSupplier: r[1], isNgo: r[2] });
         const app = await c.getApplicant(acct);
         setMyApp({ kind: Number(app.kind), orgName: app.orgName, status: Number(app.status) });
-        if (nextRoles.isAdmin) {
-          const apps = await c.getAllApplicants();
-          setApplicants(apps.map(normalizeApplicant));
-        }
       }
     } catch (e) {
       console.error(e);
@@ -154,6 +175,10 @@ export default function App() {
 
   const wrongNetwork = chainId !== null && chainId !== EXPECTED_CHAIN_ID;
 
+  // address -> applicant profile (org name + contact), for "who is this from?"
+  const profiles = {};
+  for (const a of applicants) profiles[a.account.toLowerCase()] = a;
+
   // ---- generic write wrapper ----
   async function send(label, fn) {
     try {
@@ -208,6 +233,10 @@ export default function App() {
           </div>
         )}
 
+        {hasRole && !wrongNetwork && (
+          <IdentityHeader account={account} roles={roles} myApp={myApp} />
+        )}
+
         <StatBar stats={stats} />
 
         {account && !wrongNetwork && !hasRole && <ApplyPanel myApp={myApp} onApply={send} />}
@@ -215,10 +244,17 @@ export default function App() {
           <AdminPanel applicants={applicants} paused={paused} onAction={send} />
         )}
         {roles.isSupplier && !wrongNetwork && (
-          <SupplierPanel account={account} bundles={bundles} onAction={send} />
+          <SupplierPanel account={account} bundles={bundles} profiles={profiles} onAction={send} />
         )}
         {roles.isNgo && !wrongNetwork && (
-          <NgoPanel account={account} bundles={bundles} onAction={send} onScan={setScanFor} />
+          <NgoPanel
+            account={account}
+            bundles={bundles}
+            profiles={profiles}
+            onAction={send}
+            onScan={setScanFor}
+            onReceipt={setReceiptFor}
+          />
         )}
 
         <LedgerBoard bundles={bundles} />
@@ -234,6 +270,15 @@ export default function App() {
           }}
         />
       )}
+
+      {receiptFor && (
+        <ReceiptModal
+          bundle={receiptFor}
+          donor={profiles[receiptFor.supplier?.toLowerCase()]}
+          fetchReceipt={fetchReceipt}
+          onClose={() => setReceiptFor(null)}
+        />
+      )}
     </div>
   );
 }
@@ -241,6 +286,49 @@ export default function App() {
 // ============================================================
 //                       SUB-COMPONENTS
 // ============================================================
+
+function IdentityHeader({ account, roles, myApp }) {
+  const roleLabel = roles.isAdmin
+    ? "Platform Administrator"
+    : roles.isSupplier
+    ? "Supplier"
+    : roles.isNgo
+    ? "NGO"
+    : "";
+  const name = myApp?.orgName?.trim();
+
+  return (
+    <div
+      style={{
+        background: "linear-gradient(90deg,#0f172a 0%,#1e3a8a 100%)",
+        color: "#fff",
+        borderRadius: 12,
+        padding: "22px 26px",
+        marginBottom: 22,
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        flexWrap: "wrap",
+        gap: 10,
+      }}
+    >
+      <div>
+        <div style={{ fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: "#93c5fd" }}>
+          Welcome
+        </div>
+        <div style={{ fontSize: 30, fontWeight: 800, lineHeight: 1.1 }}>
+          {name || roleLabel || "—"}
+        </div>
+        <div style={{ fontSize: 13, color: "#cbd5e1", marginTop: 4 }}>
+          {roleLabel} · {shortAddr(account)}
+        </div>
+      </div>
+      <div style={{ fontSize: 44 }}>
+        {roles.isAdmin ? "🛡️" : roles.isSupplier ? "📦" : "🌍"}
+      </div>
+    </div>
+  );
+}
 
 function StatBar({ stats }) {
   const cells = [
@@ -371,7 +459,7 @@ function AdminPanel({ applicants, paused, onAction }) {
   );
 }
 
-function SupplierPanel({ account, bundles, onAction }) {
+function SupplierPanel({ account, bundles, profiles, onAction }) {
   const [category, setCategory] = useState("0");
   const [condition, setCondition] = useState("0");
   const [count, setCount] = useState("100");
@@ -446,6 +534,20 @@ function SupplierPanel({ account, bundles, onAction }) {
                 <QrImage payload={encodeQrPayload(b.id, b.qrHash)} size={140} />
                 <code style={{ fontSize: 9, wordBreak: "break-all", color: "#94a3b8" }}>{b.qrHash.slice(0, 18)}…</code>
               </div>
+              {(b.statusLabel === "Claimed" || b.statusLabel === "Delivered") && (
+                <div style={{ marginTop: 8, padding: 8, background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 8, fontSize: 11 }}>
+                  <div style={{ fontWeight: 700, color: "#0f172a" }}>
+                    {b.statusLabel === "Delivered" ? "✅ Delivered to" : "📦 Claimed by"}
+                  </div>
+                  <div>{profiles[b.claimedBy?.toLowerCase()]?.orgName || "Unnamed NGO"}</div>
+                  <div style={{ color: "#64748b" }}>
+                    📞 {profiles[b.claimedBy?.toLowerCase()]?.contactInfo || "no contact on file"}
+                  </div>
+                  <div style={{ color: "#0f172a", marginTop: 4 }}>
+                    🚚 Send to: <strong>{b.deliveryLocation || "—"}</strong>
+                  </div>
+                </div>
+              )}
               {b.statusLabel === "Available" && (
                 <button style={{ ...styles.btn, ...styles.btnRed, ...styles.btnSm, width: "100%", marginTop: 8 }}
                   onClick={() => onAction(`Cancelling bundle #${b.id}`, (c) => c.cancelBundle(b.id))}>
@@ -460,20 +562,56 @@ function SupplierPanel({ account, bundles, onAction }) {
   );
 }
 
-function NgoPanel({ account, bundles, onAction, onScan }) {
+function NgoPanel({ account, bundles, profiles, onAction, onScan, onReceipt }) {
   const [filter, setFilter] = useState("all");
+  const [claimTarget, setClaimTarget] = useState(null);
+  const [deliveryLoc, setDeliveryLoc] = useState("");
+
+  async function confirmClaim() {
+    if (!deliveryLoc.trim()) return;
+    const ok = await onAction(
+      `Claiming bundle #${claimTarget.id}`,
+      (c) => c.claimBundle(claimTarget.id, deliveryLoc)
+    );
+    if (ok) {
+      setClaimTarget(null);
+      setDeliveryLoc("");
+    }
+  }
 
   const available = bundles.filter(
     (b) => b.statusLabel === "Available" && (filter === "all" || b.categoryLabel === filter)
   );
-  const myClaims = bundles.filter(
-    (b) => b.claimedBy.toLowerCase() === account?.toLowerCase() && b.statusLabel === "Claimed"
+  // Bundles this NGO has claimed — both awaiting delivery and already delivered,
+  // so a receipt stays accessible after completion.
+  const myBundles = bundles.filter(
+    (b) =>
+      b.claimedBy.toLowerCase() === account?.toLowerCase() &&
+      (b.statusLabel === "Claimed" || b.statusLabel === "Delivered")
   );
+
+  // "Who is this bundle from?" — org name + contact pulled from the donor's
+  // applicant record, with the wallet address as a fallback.
+  const DonorCell = ({ supplier }) => {
+    const p = profiles[supplier?.toLowerCase()];
+    return (
+      <td style={styles.td}>
+        <div style={{ fontWeight: 600 }}>{p?.orgName || "Unnamed donor"}</div>
+        <div style={{ fontSize: 11, color: "#64748b" }}>
+          {p?.contactInfo ? `📞 ${p.contactInfo}` : "no contact on file"}
+        </div>
+        <div style={{ fontSize: 10, color: "#94a3b8" }}><code>{shortAddr(supplier)}</code></div>
+      </td>
+    );
+  };
 
   return (
     <section style={styles.card}>
       <h3 style={styles.cardTitle}>🌍 NGO — claim & receive</h3>
-      <p style={styles.cardSub}>Claim available bundles, then scan the bag QR on arrival to confirm delivery on-chain.</p>
+      <p style={styles.cardSub}>
+        Each bundle shows the donor's organization and contact so you know who you're claiming
+        from. Claim a bundle, then scan its QR on arrival to confirm delivery on-chain.
+      </p>
 
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
         <label style={styles.label}>Filter category</label>
@@ -487,12 +625,13 @@ function NgoPanel({ account, bundles, onAction, onScan }) {
         <thead>
           <tr>
             <th style={styles.th}>#</th><th style={styles.th}>Category</th><th style={styles.th}>Items</th>
-            <th style={styles.th}>Condition</th><th style={styles.th}>Origin</th><th style={styles.th}>Action</th>
+            <th style={styles.th}>Condition</th><th style={styles.th}>Donor (from)</th>
+            <th style={styles.th}>Origin</th><th style={styles.th}>Action</th>
           </tr>
         </thead>
         <tbody>
           {available.length === 0 ? (
-            <tr><td style={styles.emptyTd} colSpan={6}>No available bundles in this category.</td></tr>
+            <tr><td style={styles.emptyTd} colSpan={7}>No available bundles in this category.</td></tr>
           ) : (
             available.map((b) => (
               <tr key={b.id}>
@@ -500,10 +639,11 @@ function NgoPanel({ account, bundles, onAction, onScan }) {
                 <td style={styles.td}>{CATEGORY_ICON[b.categoryLabel]} {b.categoryLabel}</td>
                 <td style={styles.td}>{b.itemCount}</td>
                 <td style={styles.td}>{b.conditionLabel}</td>
+                <DonorCell supplier={b.supplier} />
                 <td style={styles.td}><code>{b.originLocation}</code></td>
                 <td style={styles.td}>
                   <button style={{ ...styles.btn, ...styles.btnAmber, ...styles.btnSm }}
-                    onClick={() => onAction(`Claiming bundle #${b.id}`, (c) => c.claimBundle(b.id))}>
+                    onClick={() => { setClaimTarget(b); setDeliveryLoc(""); }}>
                     Claim
                   </button>
                 </td>
@@ -513,29 +653,41 @@ function NgoPanel({ account, bundles, onAction, onScan }) {
         </tbody>
       </table>
 
-      <h4 style={{ ...styles.cardTitle, fontSize: 14, marginTop: 22 }}>My claimed bundles</h4>
+      <h4 style={{ ...styles.cardTitle, fontSize: 14, marginTop: 22 }}>My bundles</h4>
       <table style={styles.table}>
         <thead>
           <tr>
-            <th style={styles.th}>#</th><th style={styles.th}>Category</th><th style={styles.th}>Items</th><th style={styles.th}>Confirm receipt</th>
+            <th style={styles.th}>#</th><th style={styles.th}>Category</th><th style={styles.th}>Items</th>
+            <th style={styles.th}>Donor (contact to coordinate)</th><th style={styles.th}>Deliver to</th>
+            <th style={styles.th}>Status</th><th style={styles.th}>Actions</th>
           </tr>
         </thead>
         <tbody>
-          {myClaims.length === 0 ? (
-            <tr><td style={styles.emptyTd} colSpan={4}>No bundles awaiting receipt.</td></tr>
+          {myBundles.length === 0 ? (
+            <tr><td style={styles.emptyTd} colSpan={7}>You haven't claimed any bundles yet.</td></tr>
           ) : (
-            myClaims.map((b) => (
+            myBundles.map((b) => (
               <tr key={b.id}>
                 <td style={styles.td}><strong>#{b.id}</strong></td>
                 <td style={styles.td}>{CATEGORY_ICON[b.categoryLabel]} {b.categoryLabel}</td>
                 <td style={styles.td}>{b.itemCount}</td>
+                <DonorCell supplier={b.supplier} />
+                <td style={styles.td}><code>{b.deliveryLocation || "—"}</code></td>
+                <td style={styles.td}><span style={styles.badge(STATUS_BADGE[b.statusLabel])}>{STATUS_BADGE[b.statusLabel].label}</span></td>
                 <td style={styles.td}>
-                  <button style={{ ...styles.btn, ...styles.btnGreen, ...styles.btnSm, marginRight: 6 }} onClick={() => onScan(b.id)}>
-                    📷 Scan QR
-                  </button>
-                  <button style={{ ...styles.btn, ...styles.btnGray, ...styles.btnSm }}
-                    onClick={() => onAction(`Releasing claim on #${b.id}`, (c) => c.releaseClaim(b.id))}>
-                    Release
+                  {b.statusLabel === "Claimed" && (
+                    <>
+                      <button style={{ ...styles.btn, ...styles.btnGreen, ...styles.btnSm, marginRight: 6 }} onClick={() => onScan(b.id)}>
+                        📷 Scan QR
+                      </button>
+                      <button style={{ ...styles.btn, ...styles.btnGray, ...styles.btnSm, marginRight: 6 }}
+                        onClick={() => onAction(`Releasing claim on #${b.id}`, (c) => c.releaseClaim(b.id))}>
+                        Release
+                      </button>
+                    </>
+                  )}
+                  <button style={{ ...styles.btn, ...styles.btnSm }} onClick={() => onReceipt(b)}>
+                    🧾 Receipt
                   </button>
                 </td>
               </tr>
@@ -543,6 +695,40 @@ function NgoPanel({ account, bundles, onAction, onScan }) {
           )}
         </tbody>
       </table>
+
+      {claimTarget && (
+        <div style={styles.modalBackdrop} onClick={() => setClaimTarget(null)}>
+          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+            <h3 style={styles.cardTitle}>Claim bundle #{claimTarget.id}</h3>
+            <p style={styles.cardSub}>
+              {CATEGORY_ICON[claimTarget.categoryLabel]} {claimTarget.categoryLabel} · {claimTarget.itemCount} items.
+              Tell the donor where to deliver it or where to meet — they'll see this and your contact.
+            </p>
+            <div style={styles.formGroup}>
+              <label style={styles.label}>Delivery location / meeting point</label>
+              <input
+                style={styles.input}
+                value={deliveryLoc}
+                onChange={(e) => setDeliveryLoc(e.target.value)}
+                placeholder="e.g. Relief Camp B, Kuala Terengganu — gate 2"
+                autoFocus
+              />
+            </div>
+            <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
+              <button
+                style={{ ...styles.btn, ...styles.btnAmber, flex: 1, ...(deliveryLoc.trim() ? {} : styles.btnDisabled) }}
+                disabled={!deliveryLoc.trim()}
+                onClick={confirmClaim}
+              >
+                Confirm claim
+              </button>
+              <button style={{ ...styles.btn, ...styles.btnGray }} onClick={() => setClaimTarget(null)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
@@ -603,6 +789,7 @@ function normalizeBundle(b) {
     status: Number(b.status),
     statusLabel: BUNDLE_STATUS[Number(b.status)],
     claimedBy: b.claimedBy,
+    deliveryLocation: b.deliveryLocation,
   };
 }
 

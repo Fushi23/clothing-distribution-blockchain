@@ -591,6 +591,11 @@ export const CONTRACT_ABI = [
         "type": "address"
       },
       {
+        "internalType": "string",
+        "name": "deliveryLocation",
+        "type": "string"
+      },
+      {
         "internalType": "uint256",
         "name": "createdAt",
         "type": "uint256"
@@ -628,6 +633,11 @@ export const CONTRACT_ABI = [
         "internalType": "uint256",
         "name": "bundleId",
         "type": "uint256"
+      },
+      {
+        "internalType": "string",
+        "name": "deliveryLocation",
+        "type": "string"
       }
     ],
     "name": "claimBundle",
@@ -799,6 +809,11 @@ export const CONTRACT_ABI = [
             "type": "address"
           },
           {
+            "internalType": "string",
+            "name": "deliveryLocation",
+            "type": "string"
+          },
+          {
             "internalType": "uint256",
             "name": "createdAt",
             "type": "uint256"
@@ -934,6 +949,11 @@ export const CONTRACT_ABI = [
             "internalType": "address",
             "name": "claimedBy",
             "type": "address"
+          },
+          {
+            "internalType": "string",
+            "name": "deliveryLocation",
+            "type": "string"
           },
           {
             "internalType": "uint256",

@@ -98,6 +98,7 @@ contract ClothingDistribution is AccessControl, Pausable, ReentrancyGuard {
         bytes32 qrHash;
         BundleStatus status;
         address claimedBy;
+        string deliveryLocation;
         uint256 createdAt;
         uint256 claimedAt;
         uint256 deliveredAt;
@@ -345,6 +346,7 @@ contract ClothingDistribution is AccessControl, Pausable, ReentrancyGuard {
             qrHash: qrHash,
             status: BundleStatus.Available,
             claimedBy: address(0),
+            deliveryLocation: "",
             createdAt: block.timestamp,
             claimedAt: 0,
             deliveredAt: 0
@@ -379,7 +381,7 @@ contract ClothingDistribution is AccessControl, Pausable, ReentrancyGuard {
     /**
      * @notice A certified NGO claims an available bundle from the dashboard.
      */
-    function claimBundle(uint256 bundleId)
+    function claimBundle(uint256 bundleId, string calldata deliveryLocation)
         external
         whenNotPaused
         nonReentrant
@@ -389,9 +391,11 @@ contract ClothingDistribution is AccessControl, Pausable, ReentrancyGuard {
 
         if (b.id == 0) revert BundleNotFound();
         if (b.status != BundleStatus.Available) revert BundleNotAvailable();
+        if (bytes(deliveryLocation).length == 0) revert EmptyField();
 
         b.status = BundleStatus.Claimed;
         b.claimedBy = msg.sender;
+        b.deliveryLocation = deliveryLocation;
         b.claimedAt = block.timestamp;
 
         emit BundleClaimed(bundleId, msg.sender);
@@ -414,6 +418,7 @@ contract ClothingDistribution is AccessControl, Pausable, ReentrancyGuard {
 
         b.status = BundleStatus.Available;
         b.claimedBy = address(0);
+        b.deliveryLocation = "";
         b.claimedAt = 0;
 
         emit ClaimReleased(bundleId, msg.sender);

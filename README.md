@@ -4,13 +4,37 @@ A blockchain web app for distributing donated / reused clothing to people in nee
 Suppliers donate **categorized, QR-tagged bundles**; certified NGOs claim them from a
 public dashboard and **scan the bag's QR code on arrival** to confirm delivery on-chain.
 
+## Key features
+
+- **Role-based access** — Admin, Supplier, and NGO each see only their own dashboard, decided
+  by their on-chain role. Suppliers and NGOs **apply in-app** and are **approved by the admin**.
+- **Personalized identity header** — once approved, a participant's **organization name** (the
+  one they entered when applying) is shown large at the top of their dashboard.
+- **Bundle donations with QR labels** — a supplier creates a categorized bundle and gets a
+  **printable QR code** to attach to the physical bag.
+- **QR-verified delivery** — the NGO scans the bag's QR on arrival; the contract confirms
+  delivery **only if the scanned hash matches** the bundle assigned to them.
+- **Camera scanner + manual fallback** — scans with the device camera (auto-detects available
+  cameras, with a picker), or paste the code manually if there's no camera.
+- **"Who is this from?" donor info** — the NGO sees the donor's **organization name and contact**
+  on every available and claimed bundle, so they know who they're claiming from.
+- **Delivery coordination** — when claiming, the NGO enters a **delivery location / meeting
+  point**. The supplier then sees **who claimed the bundle, their contact, and where to send it**,
+  so both sides can arrange the handoff.
+- **On-chain receipts** — each claimed/delivered bundle has a **🧾 Receipt** popup showing the
+  claim and delivery **transaction hashes, block numbers, and timestamps** read from chain events.
+- **Public ledger + live stats** — every bundle and its status history is visible to anyone,
+  with running totals (available / claimed / delivered).
+- **Safety rails** — emergency `pause`/`unpause`, reentrancy guards, and a **network guard** in
+  the UI that detects the wrong MetaMask network and offers a one-click switch.
+
 ## Roles
 
 | Role | Who | Can do |
 | --- | --- | --- |
 | **Admin** | platform authority (deployer) | Approve/reject applications, pause the platform |
-| **Supplier** | approved donor | Create donation bundles, print QR labels, cancel unclaimed bundles |
-| **NGO** | certified relief org | Claim available bundles, release claims, scan QR to confirm receipt |
+| **Supplier** | approved donor | Create donation bundles, print QR labels, cancel unclaimed bundles, see who claimed + where to deliver |
+| **NGO** | certified relief org | See donor org/contact, claim available bundles, release claims, scan QR to confirm receipt, view on-chain receipts |
 
 Suppliers and NGOs **apply in-app** and must be **approved by the admin** before they can act.
 
@@ -57,27 +81,33 @@ A **bundle** is one physical bag of a single category. Its on-chain status moves
 7. While still `Available`, the supplier may **`cancelBundle`** (e.g. created by mistake) →
    status `Cancelled`.
 
-### Phase 2 — Claiming (NGO)
-8. Every `Available` bundle appears on the public dashboard. An approved **NGO** browses /
-   filters by category and calls **`claimBundle`**.
-9. Status becomes **`Claimed`** and `claimedBy` is set to that NGO. The bundle is now reserved —
-   no other NGO can take it.
-10. If the NGO can no longer fulfil it, it calls **`releaseClaim`** → status returns to
-    `Available` for someone else.
+### Phase 2 — Claiming & delivery coordination (NGO)
+8. Every `Available` bundle appears on the public dashboard, each showing the **donor's org name
+   and contact** so the NGO knows who they're claiming from. The NGO browses / filters by
+   category and clicks **Claim**.
+9. Claiming requires a **delivery location / meeting point** — `claimBundle(bundleId,
+   deliveryLocation)` stores where the donor should send the bag (empty is rejected).
+10. Status becomes **`Claimed`**, `claimedBy` is set to that NGO, and the bundle is reserved. The
+    **supplier now sees who claimed it, their contact, and the delivery address** on their
+    dashboard, so the two sides can coordinate the handoff off-chain.
+11. If the NGO can no longer fulfil it, it calls **`releaseClaim`** → status returns to
+    `Available` (and the delivery location is cleared) for someone else.
 
 ### Phase 3 — Delivery & QR verification (NGO) — the core feature
-11. The bag is physically transported to the NGO.
-12. On arrival the NGO **scans the QR** on the bag (camera, or manual paste). The QR encodes
+12. The supplier sends the bag to the delivery location the NGO provided.
+13. On arrival the NGO **scans the QR** on the bag (camera, or manual paste). The QR encodes
     `bcds:<bundleId>:<qrHash>`.
-13. The frontend calls **`confirmReceipt(bundleId, scannedHash)`**. The contract checks **all**
+14. The frontend calls **`confirmReceipt(bundleId, scannedHash)`**. The contract checks **all**
     of:
     - the caller holds `NGO_ROLE`,
     - the bundle is in `Claimed` status,
     - the caller is the NGO that claimed it (`claimedBy == msg.sender`),
     - **the scanned hash matches the bundle's stored `qrHash`.**
-14. If everything matches → status becomes **`Delivered`**, `deliveredAt` is recorded, and a
+15. If everything matches → status becomes **`Delivered`**, `deliveredAt` is recorded, and a
     `BundleDelivered` event is emitted. If the scanned bag is the wrong one (hash mismatch), the
     call **reverts** — you can't confirm delivery of a bag that isn't the one assigned.
+16. Both NGO and supplier can open a **🧾 receipt** for the bundle, showing the claim/delivery
+    transaction hashes, block numbers and timestamps read from chain events.
 
 This last check is the point of the whole system: the QR scan is **cryptographic proof** that
 the exact bag the supplier donated is the one that reached the NGO — recorded on a public,
@@ -89,15 +119,53 @@ tamper-proof ledger that anyone can audit.
 - All bundles and their full status history live on-chain and are visible on the public ledger
   view — nobody can fake a donation or claim a delivery happened when it didn't.
 
+## Understanding the QR code (and testing it on one computer)
+
+**In real life, the QR code is physical.** Think of it like a tracking sticker on a parcel:
+
+1. The **supplier** creates a bundle, and a QR code shows up on their page. They **print it and
+   stick it on the actual bag of clothes.**
+2. The bag is **physically delivered** to the NGO (truck, courier, etc.).
+3. When the bag arrives, the **NGO scans the QR on the bag** with a phone camera. The app checks
+   it against the blockchain → if it matches, delivery is confirmed. This proves the NGO received
+   the *exact* bag that was assigned to them, not a wrong or swapped one.
+
+So normally the NGO scans a real sticker on a real bag.
+
+**Two things that confuse people at first:**
+
+- **Claiming does NOT need the QR.** Clicking **"Claim"** just reserves the bundle for the NGO —
+  no scan involved. The QR scan is a **separate, later step** ("Confirm receipt") that represents
+  the bag *physically arriving*.
+- **The camera scan is only the last step.** You don't scan anything to claim or to donate.
+
+**Testing alone on one computer?** You're playing supplier *and* NGO yourself, so there is no
+real bag and no printed sticker to point a camera at. Instead, use the **manual entry** option:
+
+1. As the **supplier**, copy the bundle's delivery code (the `bcds:<id>:<hash>` text shown with
+   its QR).
+2. As the **NGO**, claim the bundle, then click **"Scan QR"** → in the popup, **paste the code
+   into the "Manual entry" box** instead of using the camera → confirm.
+
+That simulates the bag arriving with its sticker. (For a real demo with a phone, you'd display
+the supplier's QR on screen and scan it with the NGO's phone camera.)
+
 ## Project layout
 
 ```
-contracts/ClothingDistribution.sol   the smart contract
-test/BCDS_Testing.ts                 20 integration tests
-ignition/modules/ClothingDistribution.ts   deployment module
-scripts/export-frontend.mjs          writes ABI + address into the frontend
-scripts/seed-local.mjs               seeds demo accounts + sample bundles
-frontend-react/                      React + Vite + ethers + MetaMask dapp
+contracts/ClothingDistribution.sol          the smart contract
+test/BCDS_Testing.ts                        22 integration tests
+ignition/modules/ClothingDistribution.ts    deployment module
+scripts/export-frontend.mjs                 writes ABI + address into the frontend
+scripts/seed-local.mjs                      seeds demo accounts + sample bundles
+frontend-react/                             React + Vite + ethers + MetaMask dapp
+  src/App.jsx                               main app: wallet, roles, panels, data loading
+  src/contract.js                           auto-generated ABI + deployed address
+  src/lib.js                                enums, labels, QR encode/decode, helpers
+  src/styles.js                             shared inline styles
+  src/components/QrImage.jsx                renders a bundle's printable QR code
+  src/components/QrScannerModal.jsx         camera QR scanner + manual entry fallback
+  src/components/ReceiptModal.jsx           on-chain transaction receipt popup
 ```
 
 ## Prerequisites

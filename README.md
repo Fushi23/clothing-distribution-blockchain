@@ -1,57 +1,82 @@
-# Sample Hardhat 3 Project (`mocha` and `ethers`)
+# Blockchain Clothing Distribution System (BCDS)
 
-This project showcases a Hardhat 3 project using `mocha` for tests and the `ethers` library for Ethereum interactions.
+A blockchain web app for distributing donated / reused clothing to people in need.
+Suppliers donate **categorized, QR-tagged bundles**; certified NGOs claim them from a
+public dashboard and **scan the bag's QR code on arrival** to confirm delivery on-chain.
 
-To learn more about Hardhat 3, please visit the [Getting Started guide](https://hardhat.org/docs/getting-started#getting-started-with-hardhat-3). To share your feedback, join our [Hardhat 3](https://hardhat.org/hardhat3-telegram-group) Telegram group or [open an issue](https://github.com/NomicFoundation/hardhat/issues/new) in our GitHub issue tracker.
+## Roles
 
-## Project Overview
+| Role | Who | Can do |
+| --- | --- | --- |
+| **Admin** | platform authority (deployer) | Approve/reject applications, pause the platform |
+| **Supplier** | approved donor | Create donation bundles, print QR labels, cancel unclaimed bundles |
+| **NGO** | certified relief org | Claim available bundles, release claims, scan QR to confirm receipt |
 
-This example project includes:
+Suppliers and NGOs **apply in-app** and must be **approved by the admin** before they can act.
 
-- A simple Hardhat configuration file.
-- Foundry-compatible Solidity unit tests.
-- TypeScript integration tests using `mocha` and ethers.js
-- Examples demonstrating how to connect to different types of networks, including locally simulating OP mainnet.
+## Workflow
 
-## Usage
-
-### Running Tests
-
-To run all the tests in the project, execute the following command:
-
-```shell
-npx hardhat test
+```
+apply → admin approves → SUPPLIER creates bundle (gets unique QR)
+      → NGO claims bundle → bag delivered physically
+      → NGO scans QR → contract verifies hash → status = Delivered
 ```
 
-You can also selectively run the Solidity or `mocha` tests:
+The QR encodes `bcds:<bundleId>:<qrHash>`. `confirmReceipt` only succeeds when the scanned
+hash matches the on-chain hash for the bundle assigned to that NGO — the cryptographic proof
+that the correct bag arrived.
 
-```shell
-npx hardhat test solidity
-npx hardhat test mocha
+## Project layout
+
+```
+contracts/ClothingDistribution.sol   the smart contract
+test/BCDS_Testing.ts                 20 integration tests
+ignition/modules/ClothingDistribution.ts   deployment module
+scripts/export-frontend.mjs          writes ABI + address into the frontend
+scripts/seed-local.mjs               seeds demo accounts + sample bundles
+frontend-react/                      React + Vite + ethers + MetaMask dapp
 ```
 
-### Make a deployment to Sepolia
+## Running locally
 
-This project includes an example Ignition module to deploy the contract. You can deploy this module to a locally simulated chain or to Sepolia.
+You need **4 terminals** (or run the node/build in the background).
 
-To run the deployment to a local chain:
+```bash
+# 0. install (once)
+npm install
+cd frontend-react && npm install && cd ..
 
-```shell
-npx hardhat ignition deploy ignition/modules/Counter.ts
+# 1. start a local chain  (terminal A — leave running)
+npx hardhat node
+
+# 2. compile + deploy + wire the frontend + seed demo data  (terminal B)
+npx hardhat compile
+npx hardhat ignition deploy ignition/modules/ClothingDistribution.ts --network localhost
+node scripts/export-frontend.mjs   # writes frontend-react/src/contract.js
+node scripts/seed-local.mjs        # optional: demo supplier, NGO, 3 bundles
+
+# 3. run the frontend  (terminal C)
+cd frontend-react && npm run dev
 ```
 
-To run the deployment to Sepolia, you need an account with funds to send the transaction. The provided Hardhat configuration includes a Configuration Variable called `SEPOLIA_PRIVATE_KEY`, which you can use to set the private key of the account you want to use.
+Then in the browser:
 
-You can set the `SEPOLIA_PRIVATE_KEY` variable using the `hardhat-keystore` plugin or by setting it as an environment variable.
+1. Add the Hardhat network to MetaMask (RPC `http://127.0.0.1:8545`, chain id `31337`) and
+   import a dev account private key (printed by `hardhat node`).
+   - Account #0 = admin, #1 = supplier (seeded), #2 = NGO (seeded).
+2. Connect the wallet — the UI shows panels for whatever role(s) your address holds.
+3. New addresses see an **Apply for access** panel; approve them from the admin account.
 
-To set the `SEPOLIA_PRIVATE_KEY` config variable using `hardhat-keystore`:
+## Testing
 
-```shell
-npx hardhat keystore set SEPOLIA_PRIVATE_KEY
+```bash
+npx hardhat test            # all tests
+npx hardhat test solidity   # Solidity unit tests only
 ```
 
-After setting the variable, you can run the deployment with the Sepolia network:
+## Notes
 
-```shell
-npx hardhat ignition deploy --network sepolia ignition/modules/Counter.ts
-```
+- Claiming is **free** (gas only) — there is no payment/escrow; this is relief distribution.
+- QR scanning uses the device camera (needs camera permission) with a manual-paste fallback.
+- `getAllBundles` / `getAllApplicants` return full arrays for simple demo-scale dashboards;
+  for production scale you'd paginate or index events off-chain instead.

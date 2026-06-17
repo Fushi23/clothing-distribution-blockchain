@@ -1,249 +1,293 @@
 import { expect } from "chai";
 import { network } from "hardhat";
 
-const { ethers } = await network.create();
+const { ethers, networkHelpers } = await network.create();
+
+// Enum mirrors (must match the contract ordering)
+const ApplicantType = { None: 0, Supplier: 1, NGO: 2 };
+const Category = { Shirts: 0, Pants: 1, Shoes: 2, Jackets: 3, Accessories: 4, Other: 5 };
+const Condition = { New: 0, Good: 1, Fair: 2 };
+const BundleStatus = { Available: 0, Claimed: 1, Delivered: 2, Cancelled: 3 };
+const AppStatus = { None: 0, Pending: 1, Approved: 2, Rejected: 3 };
+
+// Predicate matcher for an unindexed positive-uint event arg (e.g. a timestamp).
+const anyUint = (value: bigint) => typeof value === "bigint" && value > 0n;
 
 describe("Blockchain Clothing Distribution System (BCDS)", function () {
+  async function deployFixture() {
+    const [admin, supplier, ngo, outsider] = await ethers.getSigners();
 
-  let bcdsContract: any;
+    const bcds = await ethers.deployContract("ClothingDistribution", [admin.address]);
+    await bcds.waitForDeployment();
 
-  let admin: any;
-  let supplier: any;
-  let ngo: any;
-  let matcher: any;
+    return { bcds, admin, supplier, ngo, outsider };
+  }
 
-  beforeEach(async function () {
+  // Approves supplier + ngo and creates one available bundle (id 1).
+  async function seededFixture() {
+    const ctx = await deployFixture();
+    const { bcds, admin, supplier, ngo } = ctx;
 
-    // =========================================================
-    // GET TEST SIGNERS
-    // =========================================================
+    await bcds.connect(admin).registerParticipant(supplier.address, ApplicantType.Supplier);
+    await bcds.connect(admin).registerParticipant(ngo.address, ApplicantType.NGO);
 
-    [admin, supplier, ngo, matcher] =
-      await ethers.getSigners();
+    await bcds
+      .connect(supplier)
+      .createBundle(Category.Shirts, Condition.Good, 150, "Mixed cotton shirts", "Warehouse KL");
 
-    // =========================================================
-    // DEPLOY CONTRACT
-    // =========================================================
+    return ctx;
+  }
 
-    const ClothingDistribution =
-      await ethers.getContractFactory(
-        "ClothingDistribution"
+  // =========================================================
+  // REGISTRATION / APPROVAL
+  // =========================================================
+
+  describe("Registration & approval", function () {
+    it("lets an address apply and admin approve, granting the role", async function () {
+      const { bcds, admin, supplier } = await networkHelpers.loadFixture(deployFixture);
+
+      await expect(
+        bcds.connect(supplier).applyForRole(ApplicantType.Supplier, "Acme Donations", "acme@x.com")
+      )
+        .to.emit(bcds, "ApplicationSubmitted")
+        .withArgs(supplier.address, ApplicantType.Supplier, "Acme Donations");
+
+      let app = await bcds.getApplicant(supplier.address);
+      expect(app.status).to.equal(AppStatus.Pending);
+
+      await expect(bcds.connect(admin).approveApplicant(supplier.address))
+        .to.emit(bcds, "ApplicationApproved")
+        .withArgs(supplier.address, ApplicantType.Supplier);
+
+      const [, isSupplier] = await bcds.getRoles(supplier.address);
+      expect(isSupplier).to.equal(true);
+
+      app = await bcds.getApplicant(supplier.address);
+      expect(app.status).to.equal(AppStatus.Approved);
+    });
+
+    it("rejects an application without granting a role", async function () {
+      const { bcds, admin, ngo } = await networkHelpers.loadFixture(deployFixture);
+
+      await bcds.connect(ngo).applyForRole(ApplicantType.NGO, "Fake NGO", "");
+      await expect(bcds.connect(admin).rejectApplicant(ngo.address)).to.emit(
+        bcds,
+        "ApplicationRejected"
       );
 
-    bcdsContract =
-      await ClothingDistribution.deploy(admin.address);
+      const [, , isNgo] = await bcds.getRoles(ngo.address);
+      expect(isNgo).to.equal(false);
+    });
 
-    await bcdsContract.waitForDeployment();
+    it("blocks a second pending application", async function () {
+      const { bcds, supplier } = await networkHelpers.loadFixture(deployFixture);
 
-    // =========================================================
-    // ASSIGN ROLES
-    // =========================================================
+      await bcds.connect(supplier).applyForRole(ApplicantType.Supplier, "Acme", "");
+      await expect(
+        bcds.connect(supplier).applyForRole(ApplicantType.Supplier, "Acme", "")
+      ).to.be.revertedWithCustomError(bcds, "AlreadyApplied");
+    });
 
-    await bcdsContract
-      .connect(admin)
-      .addSupplier(supplier.address);
+    it("only admin can approve", async function () {
+      const { bcds, supplier, outsider } = await networkHelpers.loadFixture(deployFixture);
 
-    await bcdsContract
-      .connect(admin)
-      .addNGO(ngo.address);
-
-    await bcdsContract
-      .connect(admin)
-      .addMatcher(matcher.address);
+      await bcds.connect(supplier).applyForRole(ApplicantType.Supplier, "Acme", "");
+      await expect(bcds.connect(outsider).approveApplicant(supplier.address)).to.revert(ethers);
+    });
   });
 
   // =========================================================
-  // TOKENIZATION TEST
+  // BUNDLE CREATION
   // =========================================================
 
-  it("Should allow supplier to tokenize clothing", async function () {
+  describe("Bundle creation", function () {
+    it("lets an approved supplier create a categorized bundle with a QR hash", async function () {
+      const { bcds, supplier } = await networkHelpers.loadFixture(seededFixture);
 
-    await expect(
-      bcdsContract.connect(supplier)
-        .tokenizeClothing(
-          "Jacket, Size M, Waterproof",
-          0,
-          "KL_Hub_Centric_Coordinates"
-        )
-    ).to.emit(
-      bcdsContract,
-      "ClothingTokenized"
-    );
+      const bundle = await bcds.getBundle(1);
+      expect(bundle.supplier).to.equal(supplier.address);
+      expect(bundle.category).to.equal(Category.Shirts);
+      expect(bundle.itemCount).to.equal(150n);
+      expect(bundle.status).to.equal(BundleStatus.Available);
+      expect(bundle.qrHash).to.not.equal(ethers.ZeroHash);
+    });
 
-    const item =
-      await bcdsContract.getClothingItem(1);
+    it("rejects bundle creation from a non-supplier", async function () {
+      const { bcds, outsider } = await networkHelpers.loadFixture(seededFixture);
 
-    expect(item.supplier)
-      .to.equal(supplier.address);
+      await expect(
+        bcds
+          .connect(outsider)
+          .createBundle(Category.Shoes, Condition.Fair, 10, "stuff", "here")
+      ).to.revert(ethers);
+    });
 
-    expect(item.garmentProfile)
-      .to.equal("Jacket, Size M, Waterproof");
+    it("rejects an empty bundle (zero items)", async function () {
+      const { bcds, supplier } = await networkHelpers.loadFixture(seededFixture);
 
-    expect(item.isAllocated)
-      .to.equal(false);
+      await expect(
+        bcds.connect(supplier).createBundle(Category.Shoes, Condition.New, 0, "x", "y")
+      ).to.be.revertedWithCustomError(bcds, "InvalidItemCount");
+    });
+
+    it("lets a supplier cancel their own available bundle", async function () {
+      const { bcds, supplier } = await networkHelpers.loadFixture(seededFixture);
+
+      await expect(bcds.connect(supplier).cancelBundle(1)).to.emit(bcds, "BundleCancelled");
+      const bundle = await bcds.getBundle(1);
+      expect(bundle.status).to.equal(BundleStatus.Cancelled);
+    });
   });
 
   // =========================================================
-  // RELIEF REQUEST TEST
+  // CLAIM / RELEASE
   // =========================================================
 
-  it("Should allow NGO to create relief request", async function () {
+  describe("Claiming", function () {
+    it("lets an NGO claim an available bundle", async function () {
+      const { bcds, ngo } = await networkHelpers.loadFixture(seededFixture);
 
-    await expect(
-      bcdsContract.connect(ngo)
-        .createReliefRequest(
-          "Jacket, Size M, Waterproof",
-          1,
-          "Flood Sector B, Terengganu"
-        )
-    ).to.emit(
-      bcdsContract,
-      "ReliefRequestCreated"
-    );
+      await expect(bcds.connect(ngo).claimBundle(1))
+        .to.emit(bcds, "BundleClaimed")
+        .withArgs(1, ngo.address);
 
-    const request =
-      await bcdsContract.getReliefRequest(1);
+      const bundle = await bcds.getBundle(1);
+      expect(bundle.status).to.equal(BundleStatus.Claimed);
+      expect(bundle.claimedBy).to.equal(ngo.address);
+    });
 
-    expect(request.ngo)
-      .to.equal(ngo.address);
+    it("prevents double-claiming", async function () {
+      const { bcds, ngo } = await networkHelpers.loadFixture(seededFixture);
 
-    expect(request.status)
-      .to.equal(0); // Pending
+      await bcds.connect(ngo).claimBundle(1);
+      await expect(bcds.connect(ngo).claimBundle(1)).to.be.revertedWithCustomError(
+        bcds,
+        "BundleNotAvailable"
+      );
+    });
+
+    it("rejects a claim from a non-NGO", async function () {
+      const { bcds, supplier } = await networkHelpers.loadFixture(seededFixture);
+      await expect(bcds.connect(supplier).claimBundle(1)).to.revert(ethers);
+    });
+
+    it("lets the NGO release a claim back to the pool", async function () {
+      const { bcds, ngo } = await networkHelpers.loadFixture(seededFixture);
+
+      await bcds.connect(ngo).claimBundle(1);
+      await expect(bcds.connect(ngo).releaseClaim(1)).to.emit(bcds, "ClaimReleased");
+
+      const bundle = await bcds.getBundle(1);
+      expect(bundle.status).to.equal(BundleStatus.Available);
+      expect(bundle.claimedBy).to.equal(ethers.ZeroAddress);
+    });
   });
 
   // =========================================================
-  // MATCHING ENGINE TEST
+  // QR-VERIFIED RECEIPT (the core feature)
   // =========================================================
 
-  it("Should match supply to request", async function () {
+  describe("QR-verified delivery", function () {
+    it("confirms delivery when the scanned QR hash matches", async function () {
+      const { bcds, ngo } = await networkHelpers.loadFixture(seededFixture);
 
-    // Create inventory
-    await bcdsContract.connect(supplier)
-      .tokenizeClothing(
-        "Jacket, Size M, Waterproof",
-        0,
-        "KL_Hub"
+      await bcds.connect(ngo).claimBundle(1);
+      const { qrHash } = await bcds.getBundle(1);
+
+      await expect(bcds.connect(ngo).confirmReceipt(1, qrHash))
+        .to.emit(bcds, "BundleDelivered")
+        .withArgs(1, ngo.address, anyUint);
+
+      const bundle = await bcds.getBundle(1);
+      expect(bundle.status).to.equal(BundleStatus.Delivered);
+      expect(bundle.deliveredAt).to.be.greaterThan(0n);
+    });
+
+    it("rejects a wrong/forged QR hash", async function () {
+      const { bcds, ngo } = await networkHelpers.loadFixture(seededFixture);
+
+      await bcds.connect(ngo).claimBundle(1);
+      const forged = ethers.keccak256(ethers.toUtf8Bytes("not-the-real-bag"));
+
+      await expect(bcds.connect(ngo).confirmReceipt(1, forged)).to.be.revertedWithCustomError(
+        bcds,
+        "QrMismatch"
       );
+    });
 
-    // Create request
-    await bcdsContract.connect(ngo)
-      .createReliefRequest(
-        "Jacket, Size M, Waterproof",
-        1,
-        "Flood Zone"
+    it("rejects receipt confirmation by an NGO that did not claim it", async function () {
+      const { bcds, admin, ngo, outsider } = await networkHelpers.loadFixture(seededFixture);
+
+      // Onboard a second NGO.
+      await bcds.connect(admin).registerParticipant(outsider.address, ApplicantType.NGO);
+
+      await bcds.connect(ngo).claimBundle(1);
+      const { qrHash } = await bcds.getBundle(1);
+
+      await expect(
+        bcds.connect(outsider).confirmReceipt(1, qrHash)
+      ).to.be.revertedWithCustomError(bcds, "NotClaimant");
+    });
+
+    it("cannot confirm receipt before claiming", async function () {
+      const { bcds, ngo } = await networkHelpers.loadFixture(seededFixture);
+      const { qrHash } = await bcds.getBundle(1);
+
+      await expect(bcds.connect(ngo).confirmReceipt(1, qrHash)).to.be.revertedWithCustomError(
+        bcds,
+        "BundleNotClaimed"
       );
-
-    // Match request
-    await expect(
-      bcdsContract.connect(matcher)
-        .matchSupplyToRequest(1, 1)
-    ).to.emit(
-      bcdsContract,
-      "SupplyMatched"
-    );
-
-    const item =
-      await bcdsContract.getClothingItem(1);
-
-    const request =
-      await bcdsContract.getReliefRequest(1);
-
-    expect(item.isAllocated)
-      .to.equal(true);
-
-    expect(request.status)
-      .to.equal(1); // Matched
+    });
   });
 
   // =========================================================
-  // DELIVERY VERIFICATION TEST
+  // PAUSE
   // =========================================================
 
-  it("Should verify proof of delivery", async function () {
+  describe("Pause", function () {
+    it("blocks bundle creation while paused and resumes after unpause", async function () {
+      const { bcds, admin, supplier } = await networkHelpers.loadFixture(seededFixture);
 
-    // Setup workflow
+      await bcds.connect(admin).pause();
+      await expect(
+        bcds.connect(supplier).createBundle(Category.Pants, Condition.Good, 5, "x", "y")
+      ).to.revert(ethers);
 
-    await bcdsContract.connect(supplier)
-      .tokenizeClothing(
-        "Emergency Jacket",
-        0,
-        "Warehouse A"
-      );
+      await bcds.connect(admin).unpause();
+      await expect(
+        bcds.connect(supplier).createBundle(Category.Pants, Condition.Good, 5, "x", "y")
+      ).to.emit(bcds, "BundleCreated");
+    });
 
-    await bcdsContract.connect(ngo)
-      .createReliefRequest(
-        "Emergency Jacket",
-        1,
-        "Flood Relief Zone"
-      );
-
-    await bcdsContract.connect(matcher)
-      .matchSupplyToRequest(1, 1);
-
-    // Verify delivery
-
-    await expect(
-      bcdsContract.connect(ngo)
-        .verifyDelivery(1)
-    ).to.emit(
-      bcdsContract,
-      "DeliveryVerified"
-    );
-
-    const request =
-      await bcdsContract.getReliefRequest(1);
-
-    expect(request.status)
-      .to.equal(2); // Delivered
+    it("only admin can pause", async function () {
+      const { bcds, supplier } = await networkHelpers.loadFixture(seededFixture);
+      await expect(bcds.connect(supplier).pause()).to.revert(ethers);
+    });
   });
 
   // =========================================================
-  // ACCESS CONTROL TEST
+  // VIEW HELPERS
   // =========================================================
 
-  it("Should reject unauthorized delivery verification", async function () {
+  describe("View helpers", function () {
+    it("reports aggregate stats", async function () {
+      const { bcds, ngo } = await networkHelpers.loadFixture(seededFixture);
 
-    // Setup workflow
+      await bcds.connect(ngo).claimBundle(1);
+      const [total, available, claimed, delivered] = await bcds.getStats();
+      expect(total).to.equal(1n);
+      expect(available).to.equal(0n);
+      expect(claimed).to.equal(1n);
+      expect(delivered).to.equal(0n);
+    });
 
-    await bcdsContract.connect(supplier)
-      .tokenizeClothing(
-        "Emergency Jacket",
-        0,
-        "Warehouse A"
-      );
+    it("returns all bundles in one call", async function () {
+      const { bcds, supplier } = await networkHelpers.loadFixture(seededFixture);
 
-    await bcdsContract.connect(ngo)
-      .createReliefRequest(
-        "Emergency Jacket",
-        1,
-        "Flood Relief Zone"
-      );
-
-    await bcdsContract.connect(matcher)
-      .matchSupplyToRequest(1, 1);
-
-    // Unauthorized actor attempts verification
-
-    await expect(
-      bcdsContract.connect(supplier)
-        .verifyDelivery(1)
-    ).to.revert(ethers);
+      await bcds.connect(supplier).createBundle(Category.Shoes, Condition.New, 40, "boots", "depot");
+      const all = await bcds.getAllBundles();
+      expect(all.length).to.equal(2);
+      expect(all[1].category).to.equal(Category.Shoes);
+    });
   });
-
-  // =========================================================
-  // ROLE SECURITY TEST
-  // =========================================================
-
-  it("Should reject non-supplier tokenization", async function () {
-
-    await expect(
-      bcdsContract.connect(ngo)
-        .tokenizeClothing(
-          "Fake Item",
-          0,
-          "Unknown"
-        )
-    ).to.revert(ethers);
-  });
-
 });
